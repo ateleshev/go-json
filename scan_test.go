@@ -13,11 +13,10 @@ import (
 )
 
 type scan struct {
-	k  Kind   // s.Kind(), -1 for s.Scan() == false
-	n  string // s.Name()
-	v  string // s.Value()
-	bv bool   // s.BoolValue()
-	e  string // s.Err().Error()
+	k Kind   // s.Kind(), -1 for s.Scan() == false
+	n string // s.Name()
+	v string // s.Value()
+	e string // s.Err().Error()
 }
 
 var eof = scan{k: -1}
@@ -61,10 +60,6 @@ func (s scan) String() string {
 		buf = append(buf, strconv.Quote(s.v)...)
 	}
 
-	if s.bv {
-		buf = append(buf, ", bv=true"...)
-	}
-
 	buf = append(buf, "}"...)
 	return string(buf)
 }
@@ -81,12 +76,12 @@ var scannerTests = []struct {
 	s     string
 	scans []scan
 }{
-	{`null`, []scan{{k: Null}, eof}},
-	{` null `, []scan{{k: Null}, eof}},
-	{`false`, []scan{{k: Bool}, eof}},
-	{` false `, []scan{{k: Bool}, eof}},
-	{`true`, []scan{{k: Bool, bv: true}, eof}},
-	{` true `, []scan{{k: Bool, bv: true}, eof}},
+	{`null`, []scan{{k: Null, v: "null"}, eof}},
+	{` null `, []scan{{k: Null, v: "null"}, eof}},
+	{`false`, []scan{{k: Bool, v: "false"}, eof}},
+	{` false `, []scan{{k: Bool, v: "false"}, eof}},
+	{`true`, []scan{{k: Bool, v: "true"}, eof}},
+	{` true `, []scan{{k: Bool, v: "true"}, eof}},
 
 	{`nx`, []scan{syntaxError('x', expectNu)}},
 	{`nux`, []scan{syntaxError('x', expectNul)}},
@@ -101,7 +96,7 @@ var scannerTests = []struct {
 
 	{`[]`, []scan{{k: Array}, {k: End}, eof}},
 	{`[[]]`, []scan{{k: Array}, {k: Array}, {k: End}, {k: End}, eof}},
-	{`[true, false, null]`, []scan{{k: Array}, {k: Bool, bv: true}, {k: Bool}, {k: Null}, {k: End}, eof}},
+	{`[true, false, null]`, []scan{{k: Array}, {k: Bool, v: "true"}, {k: Bool, v: "false"}, {k: Null, v: "null"}, {k: End}, eof}},
 	{`["a", "b"]`, []scan{{k: Array}, {k: String, v: "a"}, {k: String, v: "b"}, {k: End}, eof}},
 
 	{`[x`, []scan{{k: Array}, syntaxError('x', expectValue)}},
@@ -238,9 +233,9 @@ var scannerTests = []struct {
 	{`{ "boolean, true": true, "boolean, false": false, "null": null }`,
 		[]scan{
 			{k: Object},
-			{k: Bool, n: "boolean, true", bv: true},
-			{k: Bool, n: "boolean, false"},
-			{k: Null, n: "null"},
+			{k: Bool, n: "boolean, true", v: "true"},
+			{k: Bool, n: "boolean, false", v: "false"},
+			{k: Null, n: "null", v: "null"},
 			{k: End},
 			eof}},
 
@@ -253,10 +248,10 @@ var scannerTests = []struct {
 			{k: End},
 			eof}},
 
-	{``, []scan{scanError(io.ErrUnexpectedEOF)}},
+	{``, []scan{eof}},
 	{`"`, []scan{scanError(io.ErrUnexpectedEOF)}},
 
-	{`2009-10-20@20:38:21.539575`, []scan{{k: Number, v: "2009"}, syntaxError('-', expectWhitespace)}},
+	{`2009-10`, []scan{{k: Number, v: "2009"}, {k: Number, v: "-10"}, eof}},
 
 	{`10.`, []scan{scanError(io.ErrUnexpectedEOF)}},
 	{`10e`, []scan{scanError(io.ErrUnexpectedEOF)}},
@@ -272,16 +267,17 @@ var scannerTests = []struct {
 	{`["hello"`, []scan{{k: Array}, {k: String, v: "hello"}, scanError(io.ErrUnexpectedEOF)}},
 	{`["hello",`, []scan{{k: Array}, {k: String, v: "hello"}, scanError(io.ErrUnexpectedEOF)}},
 
-	{`{} {}`, []scan{{k: Object}, {k: End}, syntaxError('{', expectWhitespace)}},
+	{`{} {}`, []scan{{k: Object}, {k: End}, {k: Object}, {k: End}, eof}},
 
 	{`[ "foo", "bar"`, []scan{{k: Array}, {k: String, v: "foo"}, {k: String, v: "bar"}, scanError(io.ErrUnexpectedEOF)}},
 }
 
-func TestScannerNext(t *testing.T) {
+func TestScanner(t *testing.T) {
 tests:
-	for _, test := range scannerTests {
-		s := NewScanner(strings.NewReader(test.s))
-		for i, want := range test.scans {
+	for _, tt := range scannerTests {
+		s := NewScanner(strings.NewReader(tt.s))
+		s.AllowMultple()
+		for i, want := range tt.scans {
 			var got scan
 			if !s.Scan() {
 				got.k = -1
@@ -292,27 +288,37 @@ tests:
 				got.k = s.Kind()
 				got.n = string(s.Name())
 				got.v = string(s.Value())
-				got.bv = s.BoolValue()
 			}
 			if !reflect.DeepEqual(got, want) {
-				t.Errorf("%q:%d, got=%s, want=%s", test.s, i, got, want)
+				t.Errorf("%q:%d, got=%s, want=%s", tt.s, i, got, want)
 				continue tests
 			}
 		}
 	}
 }
 
-func TestScannerSkip(t *testing.T) {
-	s := NewScanner(strings.NewReader(`[1, [2]]`))
-	s.Scan()
-	s.Skip()
-	if s.Scan() {
-		t.Fatalf("failed to skip array")
+func TestScanAtLevel(t *testing.T) {
+	s := NewScanner(strings.NewReader(`[[2], 1]`))
+	if !s.Scan() {
+		t.Errorf("expected s.Scan() = true")
 	}
-	s = NewScanner(strings.NewReader(`{"hello": "world"}`))
-	s.Scan()
-	s.Skip()
-	if s.Scan() {
-		t.Fatalf("failed to skip object")
+	if s.Kind() != Array {
+		t.Errorf("expected [")
+	}
+	n := s.NestingLevel()
+	if !s.Scan() {
+		t.Errorf("expected s.Scan() = true")
+	}
+	if s.Kind() != Array {
+		t.Errorf("expected [")
+	}
+	if !s.ScanAtLevel(n) {
+		t.Errorf("expected ss.Scan() = true")
+	}
+	if s.Kind() != Number || string(s.Value()) != "1" {
+		t.Errorf("expected 1")
+	}
+	if s.ScanAtLevel(n) {
+		t.Errorf("expected ss.Scan() = false")
 	}
 }

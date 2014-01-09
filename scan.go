@@ -16,27 +16,46 @@ import (
 type Kind int
 
 const (
-	// A Null represents a JSON null element.
+	// Null represents a JSON null.
 	Null Kind = iota
 
-	// A Bool represents a JSON bool element.
+	// Bool represents a JSON bool.
 	Bool
 
-	// A String represents a JSON string element.
+	// String represents a JSON string.
 	String
 
-	// A Number represents a JSON number element.
+	// Number represents a JSON number.
 	Number
 
-	// An Array represents the start of a JSON array element.
+	// Array represents the start of a JSON array.
 	Array
 
-	// An Object represents the start of a JSON object element.
+	// Object represents the start of a JSON object.
 	Object
 
-	// End represents the end of an object or array element.
+	// End represents the end of an object or array.
 	End
 )
+
+func (k Kind) String() string {
+	switch k {
+	case Null:
+		return "null"
+	case Bool:
+		return "bool"
+	case Number:
+		return "number"
+	case Array:
+		return "array"
+	case Object:
+		return "object"
+	case End:
+		return "end"
+	default:
+		return "unknown"
+	}
+}
 
 // Scanner reads a JSON document from an io.Reader. Successive calls to the
 // Scan method step through the elements of the document as follows:
@@ -53,21 +72,18 @@ const (
 // not treated as an error. Instead, they are replaced by the Unicode
 // replacement character U+FFFD.
 type Scanner struct {
-	states []stateFunc
+	cook   bool        // if true, current name or value contains non-ASCII byte.
+	pos    int         // write position in buf.
+	buf    []byte      // input buffer
+	states []stateFunc // stack of state functions
+	isName bool        // if true, then the current string is an boject member name.
+	err    error       // permanent error
+	eofOK  bool        // if true, then EOF is expected in the input.
 
-	pos int
-	buf []byte
-
-	kind      Kind
-	eofOK     bool
-	err       error
-	cook      bool
-	isKey     bool
-	boolValue bool
-
+	kind Kind // kind of the current element
 	data [2]struct {
-		pos, end int
-		cook     bool
+		pos, end int  // location in buf
+		cook     bool // if true, data may contain escapes or invalid UTF-8.
 	}
 
 	rd io.Reader
@@ -85,14 +101,20 @@ func NewScanner(rd io.Reader) *Scanner {
 	return &Scanner{
 		rd:     rd,
 		buf:    make([]byte, 0, 1024),
-		states: []stateFunc{(*Scanner).stateStart},
+		states: []stateFunc{(*Scanner).stateSingleStart},
 	}
 }
 
-// Scan advances the Scanner to the next value, which will then be available
-// through the Kind, Value, and BoolValue methods. Scan returns false if there
-// are no more tokens in the input or an error is encountered. The Err method
-// returns the error if any.
+// AllowMultple enables scanning multiple JSON values. If this method is not
+// called, then the scanner expects to find exactly one JSON value.
+func (s *Scanner) AllowMultple() {
+	s.top((*Scanner).stateMultiple)
+}
+
+// Scan advances the Scanner to the next element, which will then be available
+// through the Kind and Value methods. Scan returns false if there are no more
+// elements in the input or an error is encountered. The Err method returns the
+// error if any.
 func (s *Scanner) Scan() bool {
 	s.kind = -1
 	s.data[nameData].pos = -1
@@ -166,18 +188,29 @@ func (s *Scanner) fill() {
 	s.pos = n
 }
 
-func (s *Scanner) stateStart(b byte) stateFunc {
-	s.top((*Scanner).stateEnd)
+func (s *Scanner) stateSingleStart(b byte) stateFunc {
+	s.top((*Scanner).stateSingleEnd)
 	return s.stateValue(b)
 }
 
-func (s *Scanner) stateEnd(b byte) stateFunc {
+func (s *Scanner) stateSingleEnd(b byte) stateFunc {
 	switch {
 	case isWhiteSpace(b):
 		s.eofOK = true
-		return (*Scanner).stateEnd
+		return (*Scanner).stateSingleEnd
 	default:
 		return s.syntaxError(b, expectWhitespace)
+	}
+}
+
+func (s *Scanner) stateMultiple(b byte) stateFunc {
+	switch {
+	case isWhiteSpace(b):
+		s.eofOK = true
+		return (*Scanner).stateMultiple
+	default:
+		s.eofOK = false
+		return s.stateValue(b)
 	}
 }
 
@@ -186,7 +219,7 @@ func (s *Scanner) stateValue(b byte) stateFunc {
 	case isWhiteSpace(b):
 		return (*Scanner).stateValue
 	case b == '"':
-		s.isKey = false
+		s.isName = false
 		s.cook = false
 		s.data[valueData].pos = s.pos + 1
 		s.data[valueData].end = -1
@@ -204,10 +237,16 @@ func (s *Scanner) stateValue(b byte) stateFunc {
 		s.data[valueData].end = -1
 		return (*Scanner).stateNumberDigits
 	case b == 't':
+		s.data[valueData].pos = s.pos
+		s.data[valueData].end = -1
 		return (*Scanner).stateTr
 	case b == 'f':
+		s.data[valueData].pos = s.pos
+		s.data[valueData].end = -1
 		return (*Scanner).stateFa
 	case b == 'n':
+		s.data[valueData].pos = s.pos
+		s.data[valueData].end = -1
 		return (*Scanner).stateNu
 	case b == '[':
 		s.push((*Scanner).stateArrayElementOrClose)
@@ -262,7 +301,7 @@ func (s *Scanner) stateObjectKeyOrClose(b byte) stateFunc {
 	case b == '"':
 		s.top((*Scanner).stateObjectCommaOrClose)
 		s.cook = false
-		s.isKey = true
+		s.isName = true
 		s.data[nameData].pos = s.pos + 1
 		s.data[nameData].end = -1
 		return (*Scanner).stateString
@@ -303,7 +342,7 @@ func (s *Scanner) stateObjectKey(b byte) stateFunc {
 		return (*Scanner).stateObjectKey
 	case b == '"':
 		s.cook = false
-		s.isKey = true
+		s.isName = true
 		s.data[nameData].pos = s.pos + 1
 		s.data[nameData].end = -1
 		return (*Scanner).stateString
@@ -333,6 +372,8 @@ func (s *Scanner) stateNul(b byte) stateFunc {
 func (s *Scanner) stateNull(b byte) stateFunc {
 	switch {
 	case b == 'l':
+		s.data[valueData].end = s.pos + 1
+		s.data[valueData].cook = false
 		s.kind = Null
 		return nil
 	default:
@@ -361,8 +402,9 @@ func (s *Scanner) stateTru(b byte) stateFunc {
 func (s *Scanner) stateTrue(b byte) stateFunc {
 	switch {
 	case b == 'e':
+		s.data[valueData].end = s.pos + 1
+		s.data[valueData].cook = false
 		s.kind = Bool
-		s.boolValue = true
 		return nil
 	default:
 		return s.syntaxError(b, expectTrue)
@@ -399,8 +441,9 @@ func (s *Scanner) stateFals(b byte) stateFunc {
 func (s *Scanner) stateFalse(b byte) stateFunc {
 	switch {
 	case b == 'e':
+		s.data[valueData].end = s.pos + 1
+		s.data[valueData].cook = false
 		s.kind = Bool
-		s.boolValue = false
 		return nil
 	default:
 		return s.syntaxError(b, expectFalse)
@@ -410,7 +453,7 @@ func (s *Scanner) stateFalse(b byte) stateFunc {
 func (s *Scanner) stateString(b byte) stateFunc {
 	switch {
 	case b == '"':
-		if s.isKey {
+		if s.isName {
 			s.data[nameData].end = s.pos
 			s.data[nameData].cook = s.cook
 			return (*Scanner).stateObjectColon
@@ -578,6 +621,21 @@ func (s *Scanner) pop() {
 	s.states = s.states[:len(s.states)-1]
 }
 
+// NestingLevel returns the scanner's current nesting level for objects and array.
+func (s *Scanner) NestingLevel() int { return len(s.states) }
+
+// ScanAtLevel advances to the next element at the current nesting level,
+// possibly skipping over nested elements. ScanAtLevel returns false at the End
+// element for the current level or if an error is encountered.
+func (s *Scanner) ScanAtLevel(nestingLevel int) bool {
+	for len(s.states) > nestingLevel {
+		if !s.Scan() {
+			return false
+		}
+	}
+	return s.Scan() && s.Kind() != End
+}
+
 // Kind returns the kind of the current value.
 func (s *Scanner) Kind() Kind {
 	return s.kind
@@ -592,7 +650,7 @@ func (s *Scanner) Err() error {
 	return err
 }
 
-// Name returns the object member name of the current value.  The underlying
+// Name returns the object member name of the current value. The underlying
 // array may point to data that will be overwritten by a subsequent call to
 // Scan.
 func (s *Scanner) Name() []byte {
@@ -673,39 +731,6 @@ func (s *Scanner) cookedData(dataIndex int) []byte {
 		}
 	}
 	return wbuf[:w]
-}
-
-// BoolValue returns the  value of the current boolean value.
-func (s *Scanner) BoolValue() bool {
-	return s.boolValue
-}
-
-// Skip scans over the structure of the current value. If the current value is
-// an array or object, then Skip scans until the corresponding End token is
-// found.  Skip does nothing for the other tokens. Skip recurs if it encounters
-// an Array or Object token, so it can be used to skip nested structures.
-func (s *Scanner) Skip() {
-	n := len(s.states)
-	switch s.kind {
-	case Object:
-		n -= 1
-	case Array:
-		n -= 1
-	}
-	for len(s.states) > n && s.Scan() {
-	}
-}
-
-// ScanToEnd is like Scan, except it returns false if the token is an End
-// token.
-func (s *Scanner) ScanToEnd() bool {
-	if !s.Scan() {
-		return false
-	}
-	if s.Kind() == End {
-		return false
-	}
-	return true
 }
 
 func (s *Scanner) syntaxError(b byte, expect string) stateFunc {

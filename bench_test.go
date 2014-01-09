@@ -40,7 +40,24 @@ func codeInit() {
 	codeJSON = data
 }
 
-func BenchmarkScanner(b *testing.B) {
+func BenchmarkScanOnly(b *testing.B) {
+	b.StopTimer()
+	if codeJSON == nil {
+		codeInit()
+	}
+	b.StartTimer()
+	for i := 0; i < b.N; i++ {
+		s := json.NewScanner(bytes.NewReader(codeJSON))
+		for s.Scan() {
+		}
+		if s.Err() != nil {
+			b.Fatal(s.Err())
+		}
+	}
+	b.SetBytes(int64(len(codeJSON)))
+}
+
+func BenchmarkScanToMap(b *testing.B) {
 	b.StopTimer()
 	if codeJSON == nil {
 		codeInit()
@@ -72,24 +89,7 @@ func BenchmarkScanner(b *testing.B) {
 	b.SetBytes(int64(len(codeJSON)))
 }
 
-func BenchmarkScannerOnly(b *testing.B) {
-	b.StopTimer()
-	if codeJSON == nil {
-		codeInit()
-	}
-	b.StartTimer()
-	for i := 0; i < b.N; i++ {
-		s := json.NewScanner(bytes.NewReader(codeJSON))
-		for s.Scan() {
-		}
-		if s.Err() != nil {
-			b.Fatal(s.Err())
-		}
-	}
-	b.SetBytes(int64(len(codeJSON)))
-}
-
-func BenchmarkStdUnmarshal(b *testing.B) {
+func BenchmarkStdUnmarshalToMap(b *testing.B) {
 	b.StopTimer()
 	if codeJSON == nil {
 		codeInit()
@@ -105,7 +105,7 @@ func BenchmarkStdUnmarshal(b *testing.B) {
 	b.SetBytes(int64(len(codeJSON)))
 }
 
-func BenchmarkStdDecode(b *testing.B) {
+func BenchmarkStdDecodeToMap(b *testing.B) {
 	b.StopTimer()
 	if codeJSON == nil {
 		codeInit()

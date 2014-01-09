@@ -1,3 +1,4 @@
-This project is a work in progress. Don't use it.
+This project is a work in progress.
 
 [Documentation](http://godoc.org/github.com/garyburd/json)
+
